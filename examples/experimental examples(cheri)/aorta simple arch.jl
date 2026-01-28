@@ -6,10 +6,9 @@ using LinearAlgebra
 # ==========================================================================================
 # ==== FILES
 # ==========================================================================================
-const vessel_stl = raw"C:\Users\Administrator\Desktop\aorta\arch_tube_closed_fixed_winding.stl"
-const inlet_stl  = raw"C:\Users\Administrator\Desktop\aorta\inlet_plane_fixed.stl"
-const outlet_stl = raw"C:\Users\Administrator\Desktop\aorta\outlet_plane_fixed.stl"
-
+const vessel_stl = joinpath(@__DIR__, "aorta", "arch_tube_closed_fixed_winding.stl")
+const inlet_stl  = joinpath(@__DIR__, "aorta", "inlet_plane_fixed.stl")
+const outlet_stl = joinpath(@__DIR__, "aorta", "outlet_plane_fixed.stl")
 
 # ==========================================================================================
 # ==== SETTINGS
@@ -19,7 +18,7 @@ particle_spacing      = 0.005
 boundary_layers       = 3
 open_boundary_layers  = 4
 
-tspan         = (0.0, 1.0)
+tspan         = (0.0, 7.0)
 save_interval = 0.05
 
 REMOVE_ENDCAPS = true
@@ -29,6 +28,12 @@ USE_WINDKESSEL = true
 R1 = 2.0e6
 R2 = 8.0e6
 C  = 2.0e-9
+
+# Disc shrink (buffer points back from wall)
+DISC_SHRINK = 2.5
+
+# Open boundary model (robust default for complex/FSI cases)
+USE_DYNAMICAL_PRESSURE_BOUNDARY = true
 
 # ==========================================================================================
 # ==== FLUID PARAMETERS (WCSPH)
@@ -85,7 +90,7 @@ function estimate_radius_from_fluid(fluid_ic, cin, axis; s_min, s_max)
     return rs[Int(ceil(0.995*length(rs)))]  # robust max radius
 end
 
-function disc_on_face(face; dx, R, shrink=1.5)
+function disc_on_face(face; dx, R, shrink=2.5)
     t1, t2, _, _ = face_basis(face)
     c = face_center(face)
     r_eff = max(R - shrink*dx, 2dx)
@@ -133,6 +138,51 @@ function remove_endcaps(solid_ic, cin, cout, axis, r_keep; dx, tol=1.1)
     )
 end
 
+# ------------------------------------------------------------------------------------------
+# FIXED: remove SOLID particles ONLY in the OUTSIDE (extruded) open-boundary slab (one-sided)
+# ------------------------------------------------------------------------------------------
+function remove_solid_in_open_boundary_regions(
+    solid_ic, inlet_face, inlet_n, outlet_face, outlet_n;
+    dx, open_boundary_layers, R_in_eff, R_out_eff,
+    slab_factor=1.25, radial_margin=0.75
+)
+    X = solid_ic.coordinates
+    keep = trues(size(X, 2))
+
+    function carve!(face, n_inside, R_eff)
+        t1, t2, _, _ = face_basis(face)
+        c = face_center(face)
+        n = normalize(toS3(n_inside))  # MUST point INSIDE the fluid
+        slab = slab_factor * open_boundary_layers * dx
+        r_cut = R_eff + radial_margin * dx
+
+        for i in 1:size(X,2)
+            keep[i] || continue
+            x = SVector{3}(X[:,i]...)
+            ξ = x - c
+
+            d = dot(ξ, n)  # signed distance along inside normal
+            # Open boundary is extruded opposite n (OUTSIDE): that is d in [-slab, 0]
+            if (-slab <= d <= 0.0)
+                r = sqrt((dot(ξ, t1))^2 + (dot(ξ, t2))^2)
+                if r <= r_cut
+                    keep[i] = false
+                end
+            end
+        end
+    end
+
+    carve!(inlet_face,  inlet_n,  R_in_eff)
+    carve!(outlet_face, outlet_n, R_out_eff)
+
+    return InitialCondition(; coordinates=X[:,keep],
+        density=solid_ic.density[keep],
+        mass=solid_ic.mass[keep],
+        velocity=solid_ic.velocity[:,keep],
+        particle_spacing=solid_ic.particle_spacing
+    )
+end
+
 # ==========================================================================================
 # ==== LOAD GEOMETRY
 # ==========================================================================================
@@ -148,10 +198,16 @@ cout = face_center(outlet_face)
 axis = normalize(cout - cin)
 Laxial = norm(cout - cin)
 
+# Make face normals point INSIDE the fluid:
 inlet_n  = normalize(toS3(inlet_n0))
 outlet_n = normalize(toS3(outlet_n0))
-if dot(inlet_n, axis) < 0;  inlet_n = -inlet_n; end
-if dot(outlet_n, axis) > 0; outlet_n = -outlet_n; end
+
+if dot(inlet_n, axis) < 0
+    inlet_n = -inlet_n
+end
+if dot(outlet_n, axis) > 0
+    outlet_n = -outlet_n
+end
 
 # ==========================================================================================
 # ==== SDF + INITIAL PARTICLES
@@ -204,7 +260,7 @@ fluid_ic = InitialCondition(sol_pack, packing_fluid, semi_pack)
 solid_ic = InitialCondition(sol_pack, packing_solid, semi_pack)
 
 # ==========================================================================================
-# ==== TRUE OPENING RADIUS (critical fix!)
+# ==== TRUE OPENING RADIUS
 # ==========================================================================================
 window = 4.0*particle_spacing
 R_in  = estimate_radius_from_fluid(fluid_ic, cin, axis; s_min=0.0, s_max=window)
@@ -212,7 +268,7 @@ R_out = estimate_radius_from_fluid(fluid_ic, cin, axis; s_min=Laxial-window, s_m
 
 @show R_in R_out
 
-r_keep = max(min(R_in,R_out) - 2particle_spacing, 2particle_spacing)
+r_keep = max(min(R_in, R_out) - 2particle_spacing, 2particle_spacing)
 
 if REMOVE_ENDCAPS
     solid_ic = remove_endcaps(solid_ic, cin, cout, axis, r_keep; dx=particle_spacing)
@@ -231,18 +287,27 @@ state_equation = StateEquationCole(; sound_speed=c0_fluid,
 viscosity = ViscosityAdami(nu=ν_fluid)
 density_diffusion = DensityDiffusionMolteniColagrossi(delta=0.1)
 
-# fluid buffer sizes from inlet/outlet discs
-inlet_disc,  R_in_eff  = disc_on_face(inlet_face;  dx=particle_spacing, R=R_in)
-outlet_disc, R_out_eff = disc_on_face(outlet_face; dx=particle_spacing, R=R_out)
+# Fluid buffer "discs" (also used as sample points for Windkessel Q integration)
+inlet_disc,  R_in_eff  = disc_on_face(inlet_face;  dx=particle_spacing, R=R_in,  shrink=DISC_SHRINK)
+outlet_disc, R_out_eff = disc_on_face(outlet_face; dx=particle_spacing, R=R_out, shrink=DISC_SHRINK)
 
-inlet_buf  = ceil(Int, 2.0*size(inlet_disc.coordinates,2)*open_boundary_layers)
-outlet_buf = ceil(Int, 2.0*size(outlet_disc.coordinates,2)*open_boundary_layers)
+# IMPORTANT: ensure NO solid particles exist in the OUTSIDE open-boundary slabs
+solid_ic = remove_solid_in_open_boundary_regions(
+    solid_ic, inlet_face, inlet_n, outlet_face, outlet_n;
+    dx=particle_spacing,
+    open_boundary_layers=open_boundary_layers,
+    R_in_eff=R_in_eff,
+    R_out_eff=R_out_eff
+)
+
+inlet_buf  = ceil(Int, 5.0*size(inlet_disc.coordinates,2)*open_boundary_layers) + 5000
+outlet_buf = ceil(Int, 5.0*size(outlet_disc.coordinates,2)*open_boundary_layers) + 5000
 
 fluid_system = WeaklyCompressibleSPHSystem(
     fluid_ic, density_calculator, state_equation,
     smoothing_kernel, smoothing_length;
     viscosity, density_diffusion,
-    buffer_size=inlet_buf + outlet_buf + 5000
+    buffer_size=inlet_buf + outlet_buf + 10000
 )
 
 hydro_mass    = solid_ic.mass .* (ρ_fluid / ρ_wall)
@@ -286,9 +351,12 @@ outlet_pressure = USE_WINDKESSEL ?
                         peripheral_resistance=R2,
                         compliance=C) : p_bg
 
+# CRITICAL FIX:
+# - use sample_points matching the *disc* (circular opening)
+# - extrude_geometry stays as disc too
 inlet_zone = BoundaryZone(;
     boundary_face=inlet_face,
-    face_normal=inlet_n,
+    face_normal=inlet_n,               # points INSIDE
     density=ρ_fluid,
     particle_spacing,
     open_boundary_layers,
@@ -296,22 +364,26 @@ inlet_zone = BoundaryZone(;
     reference_velocity=inflow_func,
     reference_pressure=p_bg,
     reference_density=ρ_fluid,
-    extrude_geometry=inlet_disc
+    extrude_geometry=inlet_disc,
+    sample_points=inlet_disc.coordinates
 )
 
 outlet_zone = BoundaryZone(;
     boundary_face=outlet_face,
-    face_normal=outlet_n,
+    face_normal=outlet_n,              # points INSIDE
     density=ρ_fluid,
     particle_spacing,
     open_boundary_layers,
     boundary_type=OutFlow(),
     reference_pressure=outlet_pressure,
     reference_density=ρ_fluid,
-    extrude_geometry=outlet_disc
+    extrude_geometry=outlet_disc,
+    sample_points=outlet_disc.coordinates
 )
 
-open_boundary_model = BoundaryModelMirroringTafuni()
+open_boundary_model = USE_DYNAMICAL_PRESSURE_BOUNDARY ?
+    BoundaryModelDynamicalPressureZhang() :
+    BoundaryModelMirroringTafuni()
 
 open_inlet = OpenBoundarySystem(inlet_zone;
     fluid_system=fluid_system,
@@ -362,4 +434,3 @@ sol = solve(ode, RDPK3SpFSAL35();
     abstol=1e-4, reltol=1e-2,
     dt=2e-5, dtmax=1e-4, adaptive=true,
     save_everystep=false, callback=callbacks)
-

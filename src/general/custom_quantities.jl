@@ -3,7 +3,7 @@
 
 Returns the total kinetic energy of all particles in a system.
 """
-function kinetic_energy(system, dv_ode, du_ode, v_ode, u_ode, semi, t)
+function kinetic_energy(system::AbstractFluidSystem, dv_ode, du_ode, v_ode, u_ode, semi, t)
     v = wrap_v(v_ode, system, semi)
 
     # TODO: `current_velocity` should only contain active particles
@@ -21,6 +21,11 @@ end
 function kinetic_energy(system::AbstractBoundarySystem,
                         dv_ode, du_ode, v_ode, u_ode, semi, t)
     return zero(eltype(system))
+end
+
+# Fallback for systems that are not explicitly handled
+function kinetic_energy(system, dv_ode, du_ode, v_ode, u_ode, semi, t)
+    return NaN
 end
 
 """

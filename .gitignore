@@ -3,6 +3,7 @@
 Manifest.toml
 out
 out_*
+ABCD*
 docs/build
 docs/src/authors.md
 docs/src/contributing.md
@@ -20,6 +21,7 @@ run
 *.vtu
 *.pvd
 *.mp4
+*.zip
 
 # ParaView states
 *.pvsm

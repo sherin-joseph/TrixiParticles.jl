@@ -58,6 +58,8 @@ n_particles_xy = round(Int, box_length / particle_spacing)
 # ==========================================================================================
 # ==== Fluid
 wcsph = false
+# To be set via `trixi_include`
+vms_les = nothing
 
 nu = U * box_length / reynolds_number
 
@@ -86,6 +88,7 @@ if wcsph
                                                pressure_acceleration=TrixiParticles.inter_particle_averaged_pressure,
                                                smoothing_length,
                                                viscosity=ViscosityAdami(; nu),
+                                               vms_les=vms_les,
                                                shifting_technique=TransportVelocityAdami(;
                                                                                          background_pressure))
 else

@@ -474,6 +474,8 @@ function kick!(dv_ode, v_ode, u_ode, semi, t)
         @trixi_timeit timer() "system interaction" system_interaction!(dv_ode, v_ode, u_ode,
                                                                        semi)
 
+        @trixi_timeit timer() "VMS-LES" apply_vms_les!(dv_ode, v_ode, u_ode, semi, t)
+
         @trixi_timeit timer() "source terms" add_source_terms!(dv_ode, v_ode, u_ode,
                                                                semi, t)
     end

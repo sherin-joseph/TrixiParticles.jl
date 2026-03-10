@@ -522,6 +522,37 @@
         @test count_rhs_allocations(sol, semi) == 0
     end
 
+    @trixi_testset "fluid/taylor_green_vortex_2d.jl (WCSPH, vms_les=nothing equals baseline)" begin
+        @trixi_test_nowarn trixi_include(@__MODULE__,
+                                         joinpath(examples_dir(), "fluid",
+                                                  "taylor_green_vortex_2d.jl"),
+                                         tspan=(0.0, 0.02), wcsph=true,
+                                         particle_spacing=0.05,
+                                         perturb_coordinates=false)
+        @test sol.retcode == ReturnCode.Success
+        @test count_rhs_allocations(sol, semi) == 0
+
+        sol_base = sol
+        u_base = sol_base.u[end].x[1]
+        v_base = sol_base.u[end].x[2]
+
+        @trixi_test_nowarn trixi_include(@__MODULE__,
+                                         joinpath(examples_dir(), "fluid",
+                                                  "taylor_green_vortex_2d.jl"),
+                                         tspan=(0.0, 0.02), wcsph=true,
+                                         particle_spacing=0.05,
+                                         perturb_coordinates=false,
+                                         vms_les=nothing)
+        @test sol.retcode == ReturnCode.Success
+        @test count_rhs_allocations(sol, semi) == 0
+
+        u_off = sol.u[end].x[1]
+        v_off = sol.u[end].x[2]
+
+        @test maximum(abs.(u_base .- u_off)) == 0
+        @test maximum(abs.(v_base .- v_off)) == 0
+    end
+
     @trixi_testset "fluid/sphere_surface_tension_2d.jl" begin
         @trixi_test_nowarn trixi_include(@__MODULE__,
                                          joinpath(examples_dir(), "fluid",

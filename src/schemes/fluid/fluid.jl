@@ -255,6 +255,7 @@ end
 
 include("pressure_acceleration.jl")
 include("viscosity.jl")
+include("vms_les.jl")
 include("shifting_techniques.jl")
 include("surface_tension.jl")
 include("surface_normal_sph.jl")

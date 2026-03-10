@@ -95,7 +95,8 @@ function WeaklyCompressibleSPHSystem(initial_condition, density_calculator, stat
                                      buffer_size=nothing,
                                      correction=nothing, source_terms=nothing,
                                      surface_tension=nothing, surface_normal_method=nothing,
-                                     reference_particle_spacing=0, color_value=1)
+                                     reference_particle_spacing=0, color_value=1,
+                                     vms_les=nothing)
     buffer = isnothing(buffer_size) ? nothing :
              SystemBuffer(nparticles(initial_condition), buffer_size)
 
@@ -150,6 +151,8 @@ function WeaklyCompressibleSPHSystem(initial_condition, density_calculator, stat
              create_cache_refinement(initial_condition, particle_refinement,
                                      smoothing_length)...,
              create_cache_shifting(initial_condition, shifting_technique)...,
+             create_cache_vms_les(vms_les, initial_condition, NDIMS, ELTYPE,
+                                  n_particles)...,
              color=Int(color_value))
 
     # If the `reference_density_spacing` is set calculate the `ideal_neighbor_count`

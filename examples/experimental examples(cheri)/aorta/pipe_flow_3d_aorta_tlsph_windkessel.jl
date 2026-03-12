@@ -106,7 +106,9 @@ A_inlet     = norm(cross(Vector(inlet_edge1), Vector(inlet_edge2)))
 
 # Instantiate Windkessel with default diastolic pressure ~80 mmHg = 10 660 Pa.
 # Parameters are then auto-tuned from domain geometry and flow conditions.
-wk = Windkessel(; R1 = 100.0, R2 = 900.0, C = 1.0e-5, p0 = 10660.0)
+# Start from p0 = 0 so there is no initial pressure shock against the zero-velocity fluid.
+# The Windkessel pressure will build up naturally from the first cardiac cycle.
+wk = Windkessel(; R1 = 100.0, R2 = 900.0, C = 1.0e-5, p0 = 0.0)
 
 characteristic_length     = maximum(aorta_geometry.max_corner - aorta_geometry.min_corner)
 kinematic_viscosity       = v_mean * characteristic_length / reynolds_number
@@ -161,7 +163,8 @@ sound_speed = 20 * v_peak   # Mach << 1 even at systolic peak
 if wcsph
     state_equation   = StateEquationCole(; sound_speed, reference_density = fluid_density,
                                          exponent = 1)
-    density_diffusion = DensityDiffusionMolteniColagrossi(delta = 0.3)
+    # delta = 0.3 is aggressive and can seed pressure oscillations; 0.1 is safer.
+    density_diffusion = DensityDiffusionMolteniColagrossi(delta = 0.1)
 
     fluid_system = WeaklyCompressibleSPHSystem(fluid, fluid_density_calculator,
                                                state_equation, smoothing_kernel,
@@ -217,7 +220,9 @@ open_boundary = OpenBoundarySystem(inflow, outflow; fluid_system,
 
 structure_density  = 1200.0
 E                  = 1.0e6
-nu                 = 0.45
+# nu = 0.45 is nearly incompressible and causes TLSPH volumetric locking/instability.
+# 0.40 is still highly elastic but avoids this issue.
+nu                 = 0.40
 
 structure_thickness = structure_layers * particle_spacing
 signed_distance_field = SignedDistanceField(aorta_geometry, particle_spacing;
@@ -264,7 +269,8 @@ structure_system = TotalLagrangianSPHSystem(structure,
                                             E, nu,
                                             boundary_model    = boundary_model_structure,
                                             clamped_particles = clamped_particles,
-                                            penalty_force     = PenaltyForceGanzenmueller(alpha = 0.01))
+                                            # Larger alpha damps hourglass oscillations in the elastic wall.
+                                            penalty_force     = PenaltyForceGanzenmueller(alpha = 0.1))
 
 # ==========================================================================================
 # ==== Neighbourhood Search + Semidiscretization
@@ -300,8 +306,8 @@ callbacks = CallbackSet(info_callback, saving_callback, UpdateCallback())
 # dtmax is set tight because the pulsatile peak speed is v_peak = 0.15 m/s.
 # For longer production runs consider increasing particle_spacing and relaxing dtmax.
 sol = solve(ode, RDPK3SpFSAL35(),
-            abstol        = 1.0e-5,
-            reltol        = 1.0e-3,
-            dtmax         = 5.0e-5,
+            abstol        = 1.0e-6,
+            reltol        = 1.0e-4,
+            dtmax         = 1.0e-5,
             save_everystep = false,
             callback      = callbacks)

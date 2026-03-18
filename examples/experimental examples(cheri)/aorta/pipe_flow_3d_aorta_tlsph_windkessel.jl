@@ -4,12 +4,11 @@
 # Extends `pipe_flow_3d_aorta_tlsph.jl` with two physiological additions:
 #
 #   1. **Pulsatile inlet** : a cardiac-cycle waveform (sine-squared systolic peak +
-#      diastolic plateau) replaces the steady ramped inflow.
-#
+#      diastolic plateau) .
 #   2. **Windkessel outlet** : an RCR (proximal resistance R1, capacitor C, distal
 #      resistance R2) lumped model provides a realistic, time-varying outlet pressure
 #      instead of the fixed p=0 condition.  The model is auto-tuned from the domain
-#      geometry and flow parameters using `auto_tune_windkessel!`.
+#      geometry and flow parameters using `auto_tune_windkessel!`?.
 #
 # The vessel wall is elastic (TLSPH), identical to the parent file.
 # ==========================================================================================
@@ -20,16 +19,12 @@ using LinearAlgebra: dot, norm, cross
 using StaticArrays: SVector
 
 # ==========================================================================================
-# ==== Windkessel model (include local module)
-include(joinpath(@__DIR__, "WindkesselModel3d.jl"))
-using .WindkesselModel
+using TrixiParticles: RCRWindkesselModel
 
 # ==========================================================================================
 # ==== Resolution
 particle_spacing = 0.003
 
-# Make sure that the kernel support of fluid particles at an open boundary is always
-# fully sampled.
 open_boundary_layers = 6
 
 # Wall thickness for the elastic structure
@@ -42,6 +37,12 @@ tspan = (0.0, 1.6)   # two full cardiac cycles (T_cardiac = 0.8 s)
 fluid_density = 1000.0
 reynolds_number = 10
 
+# Toggle for outlet model:
+# - true: use RCR Windkessel outlet pressure
+# - false: use fixed outlet pressure below
+const use_windkessel = true
+const fixed_outlet_pressure = 0.0
+
 # --------------------------------------------------------------------------
 # Pulsatile (cardiac) inlet parameters
 # --------------------------------------------------------------------------
@@ -52,14 +53,6 @@ const v_peak      = v_mean * 3.0  # systolic peak speed [m/s]
 const v_diastolic = v_mean * 0.3  # diastolic baseline speed [m/s]
 const inflow_ramp_time = T_cardiac # ramp over one cardiac cycle to avoid impulse at t=0
 
-"""
-    pulsatile_inlet_speed(t)
-
-Returns the prescribed inlet speed at time `t` following a simplified aortic
-flow waveform: a sine-squared systolic pulse in the first third of each cardiac
-cycle, and a low-flow diastolic plateau in the remainder.
-A linear ramp over one cardiac cycle avoids the impulsive start.
-"""
 function pulsatile_inlet_speed(t)
     ramp   = min(t / inflow_ramp_time, 1.0)
     t_mod  = mod(t, T_cardiac)
@@ -104,30 +97,22 @@ inlet_edge1 = inlet_face_data.face[2] - inlet_face_data.face[1]
 inlet_edge2 = inlet_face_data.face[3] - inlet_face_data.face[1]
 A_inlet     = norm(cross(Vector(inlet_edge1), Vector(inlet_edge2)))
 
-# Instantiate Windkessel with default diastolic pressure ~80 mmHg = 10 660 Pa.
-# Parameters are then auto-tuned from domain geometry and flow conditions.
-# Start from p0 = 0 so there is no initial pressure shock against the zero-velocity fluid.
-# The Windkessel pressure will build up naturally from the first cardiac cycle.
-wk = Windkessel(; R1 = 100.0, R2 = 900.0, C = 1.0e-5, p0 = 0.0)
-
 characteristic_length     = maximum(aorta_geometry.max_corner - aorta_geometry.min_corner)
 kinematic_viscosity       = v_mean * characteristic_length / reynolds_number
-domain_size               = Tuple(aorta_geometry.max_corner - aorta_geometry.min_corner)
+Q_mean_ref               = A_inlet * v_mean
 
-auto_tune_windkessel!(wk, domain_size, kinematic_viscosity, Float64(reynolds_number),
-                      T_cardiac; ρ = fluid_density, ΔP_target = 1333.0)  # ~10 mmHg drop
-
-# Guard so the Windkessel is advanced only once per unique time step, even though
-# `reference_pressure_out` is evaluated once per outlet boundary particle.
-const wk_last_t = Ref(-Inf)
-
-function get_windkessel_pressure(t)
-    if t > wk_last_t[]
-        Q_out = A_inlet * pulsatile_inlet_speed(t)   # mass-conservation approximation
-        update_windkessel!(wk, Q_out, t)
-        wk_last_t[] = t
-    end
-    return wk.p
+if use_windkessel
+    # Use TrixiParticles RCRWindkesselModel for outlet pressure
+    windkessel = RCRWindkesselModel(
+        characteristic_resistance = 1.0,
+        peripheral_resistance     = 10.0,
+        compliance               = 1.0e-6
+    )
+    # The model will be updated automatically by OpenBoundarySystem when wired into BoundaryZone
+    outlet_pressure_model = windkessel
+else
+    @info "Windkessel disabled. Using fixed outlet pressure p = $(fixed_outlet_pressure) Pa"
+    outlet_pressure_model = (pos, t) -> fixed_outlet_pressure
 end
 
 # ==========================================================================================
@@ -171,7 +156,7 @@ if wcsph
                                                density_diffusion  = density_diffusion,
                                                smoothing_length,
                                                viscosity          = viscosity,
-                                               shifting_technique = ParticleShiftingTechnique(v_max_factor = 0.3),
+                                
                                                buffer_size        = n_buffer_particles)
 else
     state_equation = nothing
@@ -187,7 +172,7 @@ end
 # ==========================================================================================
 # ==== Open Boundary (pulsatile inlet + Windkessel outlet)
 
-open_boundary_model = BoundaryModelMirroringTafuni(; mirror_method = ZerothOrderMirroring())
+open_boundary_model = BoundaryModelDynamicalPressureZhang()
 
 # ---- Inlet (pulsatile velocity, no pressure/density prescription) ----
 inflow = BoundaryZone(; boundary_face      = inlet_face_data.face,
@@ -198,18 +183,18 @@ inflow = BoundaryZone(; boundary_face      = inlet_face_data.face,
                       reference_density   = nothing,
                       reference_pressure  = nothing,
                       reference_velocity  = pulsatile_velocity_function3d,
-                      boundary_type       = InFlow())
+                      boundary_type       = BidirectionalFlow())
 
-# ---- Outlet (Windkessel pressure, no velocity/density prescription) ----
+# ---- Outlet (Windkessel or fixed-pressure, no velocity/density prescription) ----
 outflow = BoundaryZone(; boundary_face      = outlet_face_data.face,
                        face_normal         = outlet_normal,
                        open_boundary_layers,
                        density             = fluid_density,
                        particle_spacing,
                        reference_density   = nothing,
-                       reference_pressure  = (pos, t) -> get_windkessel_pressure(t),
+                       reference_pressure  = outlet_pressure_model,
                        reference_velocity  = nothing,
-                       boundary_type       = OutFlow())
+                       boundary_type       = BidirectionalFlow())
 
 open_boundary = OpenBoundarySystem(inflow, outflow; fluid_system,
                                    boundary_model = open_boundary_model,
@@ -220,8 +205,6 @@ open_boundary = OpenBoundarySystem(inflow, outflow; fluid_system,
 
 structure_density  = 1200.0
 E                  = 1.0e6
-# nu = 0.45 is nearly incompressible and causes TLSPH volumetric locking/instability.
-# 0.40 is still highly elastic but avoids this issue.
 nu                 = 0.40
 
 structure_thickness = structure_layers * particle_spacing

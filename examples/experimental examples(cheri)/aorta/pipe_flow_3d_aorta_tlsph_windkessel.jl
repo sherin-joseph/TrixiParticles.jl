@@ -1,29 +1,25 @@
 # ==========================================================================================
-# 3D Pulsatile Flow in Aorta-Like STL Geometry — Elastic TLSPH Wall + Windkessel Outlet
+# 3D Pulsatile Flow in Arch STL Geometry — Elastic TLSPH Wall + Windkessel Outlet
 #
-# Extends `pipe_flow_3d_aorta_tlsph.jl` with two physiological additions:
+# Extends `pipe_flow_3d.jl` with some physiological additions:
 #
 #   1. **Pulsatile inlet** : a cardiac-cycle waveform (sine-squared systolic peak +
 #      diastolic plateau) .
 #   2. **Windkessel outlet** : an RCR (proximal resistance R1, capacitor C, distal
 #      resistance R2) lumped model provides a realistic, time-varying outlet pressure
-#      instead of the fixed p=0 condition.  The model is auto-tuned from the domain
-#      geometry and flow parameters using `auto_tune_windkessel!`?.
+#      instead of the fixed p condition.  
 #
-# The vessel wall is elastic (TLSPH), identical to the parent file.
+# The vessel wall is elastic (TLSPH), and the geometry is set using STL files.
 # ==========================================================================================
 
 using TrixiParticles
 using OrdinaryDiffEq
-using LinearAlgebra: dot, norm, cross
-using StaticArrays: SVector
+using LinearAlgebra
+using StaticArrays
 
-# ==========================================================================================
-using TrixiParticles: RCRWindkesselModel
 
-# ==========================================================================================
 # ==== Resolution
-particle_spacing = 0.003
+particle_spacing = 0.007
 
 open_boundary_layers = 6
 
@@ -80,7 +76,7 @@ outlet_face_data = planar_geometry_to_face(outlet_geometry)
 
 domain_center = (aorta_geometry.min_corner + aorta_geometry.max_corner) / 2
 inlet_normal  = orient_normal_towards_domain(inlet_face_data.face,  inlet_face_data.face_normal,  domain_center)
-outlet_normal = orient_normal_towards_domain(outlet_face_data.face, outlet_face_data.face_normal, domain_center)
+outlet_normal = - orient_normal_towards_domain(outlet_face_data.face, outlet_face_data.face_normal, domain_center)
 
 # Geometry-consistent inlet velocity direction (follows STL face normal)
 function pulsatile_velocity_function3d(pos, t)
@@ -145,29 +141,19 @@ fluid_density_calculator = ContinuityDensity()
 viscosity   = ViscosityAdami(nu = kinematic_viscosity)
 sound_speed = 20 * v_peak   # Mach << 1 even at systolic peak
 
-if wcsph
-    state_equation   = StateEquationCole(; sound_speed, reference_density = fluid_density,
+state_equation   = StateEquationCole(; sound_speed, reference_density = fluid_density,
                                          exponent = 1)
     # delta = 0.3 is aggressive and can seed pressure oscillations; 0.1 is safer.
-    density_diffusion = DensityDiffusionMolteniColagrossi(delta = 0.1)
+density_diffusion = DensityDiffusionMolteniColagrossi(delta = 0.1)
 
-    fluid_system = WeaklyCompressibleSPHSystem(fluid, fluid_density_calculator,
+fluid_system = WeaklyCompressibleSPHSystem(fluid, fluid_density_calculator,
                                                state_equation, smoothing_kernel,
                                                density_diffusion  = density_diffusion,
                                                smoothing_length,
                                                viscosity          = viscosity,
                                 
                                                buffer_size        = n_buffer_particles)
-else
-    state_equation = nothing
 
-    fluid_system = EntropicallyDampedSPHSystem(fluid, smoothing_kernel,
-                                               smoothing_length, sound_speed,
-                                               viscosity            = viscosity,
-                                               density_calculator   = fluid_density_calculator,
-                                               shifting_technique   = ParticleShiftingTechnique(),
-                                               buffer_size          = n_buffer_particles)
-end
 
 # ==========================================================================================
 # ==== Open Boundary (pulsatile inlet + Windkessel outlet)
